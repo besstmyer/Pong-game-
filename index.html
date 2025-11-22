@@ -2,14 +2,14 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>Shield Pong</title>
+  <title>Neon Hell: Rock Survivor</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
   <style>
     html, body {
       margin: 0;
       padding: 0;
       overflow: hidden;
-      background: #000018;
+      background: #000;
       touch-action: none;
       font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
     }
@@ -18,27 +18,64 @@
     }
     #hud {
       position: fixed;
-      top: 12px;
+      top: 10px;
       left: 50%;
       transform: translateX(-50%);
-      color: white;
-      font-size: 18px;
-      text-shadow: 0 0 4px rgba(0,0,0,0.8);
+      color: #fff;
+      font-size: 16px;
+      text-align: center;
+      text-shadow: 0 0 6px rgba(0,0,0,0.9);
       user-select: none;
       pointer-events: none;
-      text-align: center;
       padding: 4px 10px;
+      z-index: 5;
+    }
+    #buttons {
+      position: fixed;
+      bottom: 10px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 10px;
+      z-index: 10;
+    }
+    .btn {
+      background: rgba(0,0,0,0.6);
+      color: #fff;
+      border-radius: 999px;
+      padding: 6px 14px;
+      font-size: 13px;
+      border: 1px solid rgba(255,255,255,0.4);
+      backdrop-filter: blur(6px);
+      cursor: pointer;
+      user-select: none;
     }
   </style>
 </head>
 <body>
-  <div id="hud">Shield Pong</div>
+  <div id="hud">Neon Hell – tap to start</div>
+  <div id="buttons">
+    <div class="btn" id="musicToggle">Music: OFF</div>
+  </div>
   <canvas id="game"></canvas>
+
+  <!-- Drop a free electronic/rock track named music.mp3 in same folder -->
+  <audio id="music" loop>
+    <source src="music.mp3" type="audio/mpeg" />
+  </audio>
+
+  <!-- Optional hit sound: hit.mp3 -->
+  <audio id="hitSound">
+    <source src="hit.mp3" type="audio/mpeg" />
+  </audio>
 
   <script>
     const canvas = document.getElementById('game');
     const ctx = canvas.getContext('2d');
     const hud = document.getElementById('hud');
+    const musicEl = document.getElementById('music');
+    const hitSoundEl = document.getElementById('hitSound');
+    const musicToggleBtn = document.getElementById('musicToggle');
 
     function resize() {
       canvas.width = window.innerWidth;
@@ -47,136 +84,382 @@
     window.addEventListener('resize', resize);
     resize();
 
-    // --- Audio setup ---
-    let audioCtx = null;
-    function initAudio() {
-      if (!audioCtx) {
-        const AudioContext = window.AudioContext || window.webkitAudioContext;
-        if (AudioContext) {
-          audioCtx = new AudioContext();
+    // ---- DIFFICULTIES ----
+    const difficulties = {
+      Easy:   { label: 'Easy',   spawnBase: 0.9,  speedBase: 100, countBase: 14, color: '#81c784' },
+      Normal: { label: 'Normal', spawnBase: 0.7,  speedBase: 120, countBase: 18, color: '#64b5f6' },
+      Hard:   { label: 'Hard',   spawnBase: 0.55, speedBase: 150, countBase: 24, color: '#ffb74d' },
+      Chaos:  { label: 'Chaos',  spawnBase: 0.40, speedBase: 190, countBase: 30, color: '#e57373' }
+    };
+
+    let currentDifficultyKey = 'Normal';
+    let currentDifficulty = difficulties[currentDifficultyKey];
+
+    // ---- GAME STATE ----
+    let gameState = 'menu'; // 'menu' | 'choosing' | 'playing' | 'gameover'
+    let score = 0;
+    let timeSurvived = 0;
+    let lastTime = performance.now();
+    let spawnTimer = 0;
+    let difficultyTimer = 0;
+    let spawnInterval = currentDifficulty.spawnBase;
+    let bullets = [];
+    let particles = [];
+    let powerups = [];
+
+    // powerup timers / states
+    let shieldTimer = 0;
+    let slowmoTimer = 0;
+    let powerupSpawnTimer = 0;
+    let powerupIntervalBase = 7; // seconds between powerups baseline
+    let timeScale = 1; // affects bullets, spawns, etc, but not UI timers
+
+    // highscores
+    let bestTime = 0;
+    let bestScore = 0;
+    try {
+      bestTime = parseFloat(localStorage.getItem('neonHellBestTime')) || 0;
+      bestScore = parseInt(localStorage.getItem('neonHellBestScore') || '0', 10);
+    } catch (e) {}
+
+    const player = {
+      x: canvas.width / 2,
+      y: canvas.height / 2,
+      radius: 24,
+      alive: true,
+      glow: 0
+    };
+
+    // Music toggle
+    let musicOn = false;
+    musicToggleBtn.addEventListener('click', () => {
+      musicOn = !musicOn;
+      if (musicOn) {
+        musicEl.play().catch(() => {});
+        musicToggleBtn.textContent = 'Music: ON';
+      } else {
+        musicEl.pause();
+        musicToggleBtn.textContent = 'Music: OFF';
+      }
+    });
+
+    // ---- INPUT ----
+    function movePlayer(x, y) {
+      if (gameState !== 'playing') return;
+      player.x = x;
+      player.y = y;
+    }
+
+    canvas.addEventListener('mousemove', e => {
+      movePlayer(e.clientX, e.clientY);
+    });
+
+    canvas.addEventListener('touchmove', e => {
+      e.preventDefault();
+      const t = e.touches[0];
+      movePlayer(t.clientX, t.clientY);
+    }, { passive: false });
+
+    canvas.addEventListener('mousedown', e => {
+      handleTap(e.clientX, e.clientY);
+    });
+    canvas.addEventListener('touchstart', e => {
+      const t = e.touches[0];
+      handleTap(t.clientX, t.clientY);
+    }, { passive: true });
+
+    function handleTap(x, y) {
+      if (gameState === 'menu') {
+        // go to difficulty selection popup
+        gameState = 'choosing';
+        hud.textContent = 'Choose your difficulty';
+        return;
+      }
+      if (gameState === 'choosing') {
+        handleDifficultyClick(x, y);
+        return;
+      }
+      if (gameState === 'gameover') {
+        // from gameover, go back to difficulty screen
+        gameState = 'choosing';
+        hud.textContent = 'Choose your difficulty';
+        return;
+      }
+    }
+
+    // ---- DIFFICULTY POPUP BUTTONS ----
+    const diffButtons = [
+      { key: 'Easy',   rect: { x: 0, y: 0, w: 0, h: 0 } },
+      { key: 'Normal', rect: { x: 0, y: 0, w: 0, h: 0 } },
+      { key: 'Hard',   rect: { x: 0, y: 0, w: 0, h: 0 } },
+      { key: 'Chaos',  rect: { x: 0, y: 0, w: 0, h: 0 } }
+    ];
+
+    function layoutDifficultyButtons() {
+      const totalWidth = Math.min(canvas.width * 0.9, 360);
+      const btnHeight = 40;
+      const spacing = 10;
+      const count = diffButtons.length;
+      const btnWidth = (totalWidth - spacing * (count - 1)) / count;
+
+      const startX = canvas.width / 2 - totalWidth / 2;
+      const y = canvas.height / 2 + 40;
+
+      diffButtons.forEach((btn, i) => {
+        btn.rect.x = startX + i * (btnWidth + spacing);
+        btn.rect.y = y;
+        btn.rect.w = btnWidth;
+        btn.rect.h = btnHeight;
+      });
+    }
+
+    function handleDifficultyClick(x, y) {
+      for (const btn of diffButtons) {
+        const r = btn.rect;
+        if (x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h) {
+          setDifficulty(btn.key);
+          restartGame();
+          return;
         }
       }
     }
 
-    function playBeep(freq = 440, duration = 0.08, volume = 0.2) {
-      if (!audioCtx) return;
-      const osc = audioCtx.createOscillator();
-      const gain = audioCtx.createGain();
-      osc.frequency.value = freq;
-      osc.type = 'square';
-      gain.gain.value = volume;
-      osc.connect(gain);
-      gain.connect(audioCtx.destination);
-      const now = audioCtx.currentTime;
-      osc.start(now);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + duration);
-      osc.stop(now + duration);
+    function setDifficulty(key) {
+      currentDifficultyKey = key;
+      currentDifficulty = difficulties[key];
+      spawnInterval = currentDifficulty.spawnBase;
     }
 
-    const MAX_SCORE = 7;
-
-    const paddleWidth = 18;
-    const paddleHeight = 120;
-    const ballRadius = 16;
-
-    const player = {
-      x: 30,
-      y: canvas.height / 2 - paddleHeight / 2,
-      score: 0,
-      hitTimer: 0
-    };
-
-    const ai = {
-      x: canvas.width - 30 - paddleWidth,
-      y: canvas.height / 2 - paddleHeight / 2,
-      score: 0,
-      hitTimer: 0
-    };
-
-    const ball = {
-      x: canvas.width / 2,
-      y: canvas.height / 2,
-      vx: 6,
-      vy: 4
-    };
-
-    let gameState = 'menu'; // 'menu' | 'playing' | 'gameover'
-    let winnerText = '';
-
-    function clampPaddles() {
-      player.y = Math.max(0, Math.min(canvas.height - paddleHeight, player.y));
-      ai.y = Math.max(0, Math.min(canvas.height - paddleHeight, ai.y));
+    // ---- UTILITY ----
+    function randRange(min, max) {
+      return Math.random() * (max - min) + min;
     }
 
-    function resetBall(direction = 1) {
-      ball.x = canvas.width / 2;
-      ball.y = canvas.height / 2;
-      ball.vx = 6 * direction;
-      ball.vy = (Math.random() * 4 - 2);
-    }
-
-    function resetScores() {
-      player.score = 0;
-      ai.score = 0;
-    }
-
-    function startGame() {
-      initAudio();
-      resetScores();
-      resetBall(1);
-      gameState = 'playing';
-      winnerText = '';
-    }
-
-    function handlePlayerInput(screenY) {
-      if (gameState !== 'playing') return;
-      player.y = screenY - paddleHeight / 2;
-      clampPaddles();
-    }
-
-    // --- Input ---
-    canvas.addEventListener('mousemove', (e) => {
-      handlePlayerInput(e.clientY);
-    });
-
-    canvas.addEventListener('touchmove', (e) => {
-      e.preventDefault();
-      const touch = e.touches[0];
-      handlePlayerInput(touch.clientY);
-    }, { passive: false });
-
-    function handleTap() {
-      if (gameState === 'menu' || gameState === 'gameover') {
-        startGame();
-      }
-    }
-
-    canvas.addEventListener('mousedown', () => {
-      initAudio();
-      handleTap();
-    });
-
-    canvas.addEventListener('touchstart', (e) => {
-      initAudio();
-      handleTap();
-    }, { passive: true });
-
-    // --- Particles ---
-    const particles = [];
-
-    function spawnBurst(x, y, color, amount = 18, speed = 6) {
-      for (let i = 0; i < amount; i++) {
+    function spawnParticleBurst(x, y, color, count = 18, speed = 300) {
+      for (let i = 0; i < count; i++) {
         const angle = Math.random() * Math.PI * 2;
-        const mag = Math.random() * speed;
+        const mag = randRange(speed * 0.3, speed);
         particles.push({
-          x,
-          y,
+          x, y,
           vx: Math.cos(angle) * mag,
           vy: Math.sin(angle) * mag,
-          life: 0.5 + Math.random() * 0.4,
+          life: randRange(0.4, 0.9),
           color
         });
       }
+    }
+
+    // ---- BULLET WAVES ----
+    function spawnBulletWave() {
+      const cx = randRange(0, canvas.width);
+      const cy = randRange(0, canvas.height);
+      const baseCount = currentDifficulty.countBase;
+      const count = baseCount + Math.floor(Math.random() * 6);
+      const baseSpeed = currentDifficulty.speedBase + difficultyTimer * 18;
+
+      for (let i = 0; i < count; i++) {
+        const angle = (Math.PI * 2 * i) / count + randRange(-0.12, 0.12);
+        const speed = baseSpeed + randRange(-30, 40);
+        const hue = (angle * 180 / Math.PI * 2 + difficultyTimer * 20) % 360;
+        bullets.push({
+          x: cx,
+          y: cy,
+          vx: Math.cos(angle) * speed,
+          vy: Math.sin(angle) * speed,
+          radius: randRange(6, 10),
+          hue
+        });
+      }
+
+      spawnParticleBurst(cx, cy, 'hsla(0,100%,100%,ALPHA)', 24, 260);
+    }
+
+    // ---- POWERUPS ----
+    function spawnPowerupFromEdge() {
+      const side = Math.floor(Math.random() * 4); // 0=top,1=right,2=bottom,3=left
+      let x, y, vx, vy;
+      const speed = 80;
+
+      if (side === 0) { // top
+        x = randRange(0, canvas.width);
+        y = -20;
+      } else if (side === 1) { // right
+        x = canvas.width + 20;
+        y = randRange(0, canvas.height);
+      } else if (side === 2) { // bottom
+        x = randRange(0, canvas.width);
+        y = canvas.height + 20;
+      } else { // left
+        x = -20;
+        y = randRange(0, canvas.height);
+      }
+
+      const targetX = canvas.width / 2;
+      const targetY = canvas.height / 2;
+      const dx = targetX - x + randRange(-80, 80);
+      const dy = targetY - y + randRange(-80, 80);
+      const len = Math.hypot(dx, dy) || 1;
+      vx = (dx / len) * speed;
+      vy = (dy / len) * speed;
+
+      // pick a powerup type
+      const types = ['shield', 'slowmo', 'nuke', 'time'];
+      const type = types[Math.floor(Math.random() * types.length)];
+
+      let color;
+      if (type === 'shield') color = 'hsla(190, 90%, 60%, ALPHA)';
+      else if (type === 'slowmo') color = 'hsla(280, 90%, 70%, ALPHA)';
+      else if (type === 'nuke') color = 'hsla(10, 100%, 63%, ALPHA)';
+      else color = 'hsla(120, 80%, 60%, ALPHA)';
+
+      powerups.push({
+        type,
+        x, y,
+        vx, vy,
+        radius: 14,
+        color,
+        pulse: 0
+      });
+    }
+
+    function applyPowerup(pu) {
+      if (pu.type === 'shield') {
+        shieldTimer = 3.0;
+        player.glow = 1.5;
+      } else if (pu.type === 'slowmo') {
+        slowmoTimer = 4.0;
+      } else if (pu.type === 'nuke') {
+        spawnParticleBurst(canvas.width / 2, canvas.height / 2, 'hsla(0,0%,100%,ALPHA)', 80, 420);
+        bullets = [];
+      } else if (pu.type === 'time') {
+        timeSurvived += 3;
+        spawnParticleBurst(player.x, player.y, 'hsla(120,80%,70%,ALPHA)', 16, 200);
+      }
+    }
+
+    // ---- GAME CONTROL ----
+    function restartGame() {
+      bullets = [];
+      particles = [];
+      powerups = [];
+      score = 0;
+      timeSurvived = 0;
+      spawnTimer = 0;
+      difficultyTimer = 0;
+      powerupSpawnTimer = 0;
+      shieldTimer = 0;
+      slowmoTimer = 0;
+      timeScale = 1;
+      spawnInterval = currentDifficulty.spawnBase;
+
+      player.x = canvas.width / 2;
+      player.y = canvas.height / 2;
+      player.alive = true;
+      player.glow = 0;
+
+      gameState = 'playing';
+      hud.textContent = `Survive the neon storm – ${currentDifficulty.label} mode`;
+    }
+
+    function gameOver() {
+      if (gameState === 'gameover') return;
+      gameState = 'gameover';
+      player.alive = false;
+      player.glow = 1.5;
+
+      // highscore update
+      if (timeSurvived > bestTime) bestTime = timeSurvived;
+      if (score > bestScore) bestScore = score;
+      try {
+        localStorage.setItem('neonHellBestTime', String(bestTime));
+        localStorage.setItem('neonHellBestScore', String(bestScore));
+      } catch (e) {}
+
+      try {
+        hitSoundEl.currentTime = 0;
+        hitSoundEl.play().catch(()=>{});
+      } catch(e){}
+
+      spawnParticleBurst(player.x, player.y, 'hsla(0,100%,65%,ALPHA)', 80, 380);
+      hud.textContent =
+        `You survived ${timeSurvived.toFixed(1)}s – tap to try again`;
+    }
+
+    // ---- UPDATE ----
+    function update(dt) {
+      // slowmo affects game motion, not real timeSurvived
+      timeScale = slowmoTimer > 0 ? 0.45 : 1;
+      const gdt = dt * timeScale; // game dt
+
+      if (shieldTimer > 0) shieldTimer -= dt;
+      if (slowmoTimer > 0) slowmoTimer -= dt;
+
+      if (gameState !== 'playing') {
+        updateParticles(dt);
+        updatePowerups(gdt);
+        return;
+      }
+
+      timeSurvived += dt;
+      difficultyTimer += gdt;
+      score = Math.floor(timeSurvived * 10);
+
+      // ramp difficulty
+      spawnInterval = Math.max(
+        0.20,
+        currentDifficulty.spawnBase - difficultyTimer * 0.02
+      );
+
+      // bullet wave timer
+      spawnTimer += gdt;
+      if (spawnTimer >= spawnInterval) {
+        spawnTimer = 0;
+        spawnBulletWave();
+      }
+
+      // powerup spawn timer (slower cadence)
+      const powerupInterval = Math.max(4, powerupIntervalBase - difficultyTimer * 0.05);
+      powerupSpawnTimer += dt;
+      if (powerupSpawnTimer >= powerupInterval) {
+        powerupSpawnTimer = 0;
+        spawnPowerupFromEdge();
+      }
+
+      // update bullets
+      for (let i = bullets.length - 1; i >= 0; i--) {
+        const b = bullets[i];
+        b.x += b.vx * gdt;
+        b.y += b.vy * gdt;
+
+        if (
+          b.x < -40 || b.x > canvas.width + 40 ||
+          b.y < -40 || b.y > canvas.height + 40
+        ) {
+          bullets.splice(i, 1);
+          continue;
+        }
+
+        const dx = b.x - player.x;
+        const dy = b.y - player.y;
+        const dist = Math.hypot(dx, dy);
+        const effectiveRadius = shieldTimer > 0 ? player.radius * 0.7 : player.radius * 0.7;
+
+        if (dist < b.radius + effectiveRadius) {
+          if (shieldTimer > 0) {
+            // bullet destroyed by shield
+            spawnParticleBurst(b.x, b.y, 'hsla(190,80%,70%,ALPHA)', 12, 280);
+            bullets.splice(i, 1);
+          } else {
+            gameOver();
+            break;
+          }
+        }
+      }
+
+      player.glow = Math.max(0, player.glow - dt * 1.5);
+
+      updateParticles(dt);
+      updatePowerups(gdt);
     }
 
     function updateParticles(dt) {
@@ -187,308 +470,320 @@
           particles.splice(i, 1);
           continue;
         }
-        p.x += p.vx;
-        p.y += p.vy;
-        p.vy += 8 * dt * 0.2; // slight gravity
+        p.x += p.vx * dt;
+        p.y += p.vy * dt;
+        p.vy += 40 * dt * 0.4;
       }
     }
 
-    function drawParticles() {
-      particles.forEach(p => {
-        const alpha = Math.max(0, p.life * 2);
-        ctx.fillStyle = p.color.replace('ALPHA', alpha.toFixed(3));
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
-        ctx.fill();
-      });
+    function updatePowerups(dt) {
+      for (let i = powerups.length - 1; i >= 0; i--) {
+        const pu = powerups[i];
+        pu.x += pu.vx * dt;
+        pu.y += pu.vy * dt;
+        pu.pulse += dt * 3;
+
+        // offscreen kill
+        if (
+          pu.x < -60 || pu.x > canvas.width + 60 ||
+          pu.y < -60 || pu.y > canvas.height + 60
+        ) {
+          powerups.splice(i, 1);
+          continue;
+        }
+
+        if (gameState === 'playing') {
+          const dx = pu.x - player.x;
+          const dy = pu.y - player.y;
+          const dist = Math.hypot(dx, dy);
+          if (dist < pu.radius + player.radius * 0.8) {
+            applyPowerup(pu);
+            powerups.splice(i, 1);
+          }
+        }
+      }
     }
 
-    // --- Visual helpers ---
-    function drawStar(cx, cy, spikes, outerRadius, innerRadius, color, alpha) {
+    // ---- DRAW ----
+    function drawBackground(t) {
+      const grad = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
+      const shift = (t * 30) % 360;
+      grad.addColorStop(0, `hsl(${(200 + shift) % 360}, 70%, 10%)`);
+      grad.addColorStop(0.5, `hsl(${(260 + shift) % 360}, 80%, 16%)`);
+      grad.addColorStop(1, `hsl(${(320 + shift) % 360}, 70%, 10%)`);
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      // subtle grid
       ctx.save();
-      ctx.globalAlpha = alpha;
+      ctx.globalAlpha = 0.13;
+      ctx.strokeStyle = 'rgba(255,255,255,0.2)';
+      const step = 40;
       ctx.beginPath();
-      let rot = Math.PI / 2 * 3;
-      let x = cx;
-      let y = cy;
-      const step = Math.PI / spikes;
-
-      ctx.moveTo(cx, cy - outerRadius);
-      for (let i = 0; i < spikes; i++) {
-        x = cx + Math.cos(rot) * outerRadius;
-        y = cy + Math.sin(rot) * outerRadius;
-        ctx.lineTo(x, y);
-        rot += step;
-
-        x = cx + Math.cos(rot) * innerRadius;
-        y = cy + Math.sin(rot) * innerRadius;
-        ctx.lineTo(x, y);
-        rot += step;
+      for (let x = 0; x < canvas.width; x += step) {
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, canvas.height);
       }
-      ctx.lineTo(cx, cy - outerRadius);
-      ctx.closePath();
-      ctx.fillStyle = color;
-      ctx.fill();
+      for (let y = 0; y < canvas.height; y += step) {
+        ctx.moveTo(0, y);
+        ctx.lineTo(canvas.width, y);
+      }
+      ctx.stroke();
       ctx.restore();
     }
 
-    function drawShieldBall(idleSpin = false, time = 0) {
-      let x = ball.x;
-      let y = ball.y;
+    function drawPlayer(t) {
+      const wobble = Math.sin(t * 6) * 3;
 
-      if (gameState !== 'playing') {
-        x = canvas.width / 2;
-        y = canvas.height / 2;
-      }
-
-      const r = ballRadius;
-      const spin = idleSpin ? time * 1.2 : 0;
-
-      // Outer ring - red
       ctx.save();
-      ctx.translate(x, y);
-      ctx.rotate(spin);
+      ctx.translate(player.x, player.y);
 
+      // glow
+      const glow = 26 + player.glow * 26 + (shieldTimer > 0 ? 10 : 0);
+      const glowGrad = ctx.createRadialGradient(0, 0, 0, 0, 0, glow);
+      glowGrad.addColorStop(0, shieldTimer > 0 ? 'rgba(120,220,255,0.9)' : 'rgba(255,255,0,0.8)');
+      glowGrad.addColorStop(1, 'rgba(255,0,150,0)');
+      ctx.fillStyle = glowGrad;
       ctx.beginPath();
-      ctx.arc(0, 0, r, 0, Math.PI * 2);
-      ctx.fillStyle = '#c62828';
+      ctx.arc(0, 0, glow, 0, Math.PI * 2);
       ctx.fill();
 
-      // Middle ring - white
+      // body – leather jumpsuit
+      ctx.save();
+      ctx.translate(0, 20);
+      ctx.fillStyle = '#111';
       ctx.beginPath();
-      ctx.arc(0, 0, r * 0.7, 0, Math.PI * 2);
-      ctx.fillStyle = '#f5f5f5';
+      ctx.roundRect(-16, -10, 32, 52, 8);
       ctx.fill();
 
-      // Inner circle - blue
+      // silver belt
+      ctx.fillStyle = '#ccc';
+      ctx.fillRect(-18, 6, 36, 4);
+
+      // legs
+      ctx.fillStyle = '#111';
+      ctx.fillRect(-16, 10, 12, 26);
+      ctx.fillRect(4, 10, 12, 26);
+
+      // boots
+      ctx.fillStyle = '#444';
+      ctx.fillRect(-18, 32, 16, 6);
+      ctx.fillRect(2, 32, 16, 6);
+      ctx.restore();
+
+      // arms with guitar-ish pose
+      ctx.strokeStyle = '#ffdd55';
+      ctx.lineWidth = 6;
       ctx.beginPath();
-      ctx.arc(0, 0, r * 0.45, 0, Math.PI * 2);
-      ctx.fillStyle = '#1565c0';
+      ctx.moveTo(-18, 22);
+      ctx.lineTo(-34, 10 + wobble);
+      ctx.moveTo(18, 22);
+      ctx.lineTo(34, 4 - wobble);
+      ctx.stroke();
+
+      // head – yellow rock dad
+      ctx.translate(0, -10);
+      ctx.fillStyle = '#ffeb3b';
+      ctx.beginPath();
+      ctx.arc(0, -10, player.radius, 0, Math.PI * 2);
       ctx.fill();
 
-      // Center star
+      // hair
+      ctx.fillStyle = '#222';
+      ctx.beginPath();
+      ctx.ellipse(0, -16, player.radius + 4, player.radius, 0, Math.PI, 0);
+      ctx.fill();
+
+      // face paint – star
+      ctx.save();
+      ctx.translate(-6, -12);
+      ctx.rotate(0.2);
       ctx.beginPath();
       const spikes = 5;
-      const outer = r * 0.35;
-      const inner = r * 0.18;
+      const outer = 7;
+      const inner = 3;
       let rot = Math.PI / 2 * 3;
-      let sx = 0;
-      let sy = 0;
       const step = Math.PI / spikes;
-
       ctx.moveTo(0, -outer);
       for (let i = 0; i < spikes; i++) {
-        sx = Math.cos(rot) * outer;
-        sy = Math.sin(rot) * outer;
+        let sx = Math.cos(rot) * outer;
+        let sy = Math.sin(rot) * outer;
         ctx.lineTo(sx, sy);
         rot += step;
-
         sx = Math.cos(rot) * inner;
         sy = Math.sin(rot) * inner;
         ctx.lineTo(sx, sy);
         rot += step;
       }
-      ctx.lineTo(0, -outer);
       ctx.closePath();
-      ctx.fillStyle = '#f5f5f5';
+      ctx.fillStyle = '#311b92';
+      ctx.fill();
+      ctx.restore();
+
+      // eyes & mouth
+      ctx.fillStyle = '#000';
+      ctx.beginPath();
+      ctx.arc(2, -14, 2, 0, Math.PI * 2);
+      ctx.arc(8, -14, 2, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.beginPath();
+      ctx.arc(5, -6, 6, 0.1 * Math.PI, 0.9 * Math.PI);
+      ctx.strokeStyle = '#000';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+
+      // white highlight
+      ctx.globalAlpha = 0.15;
+      ctx.fillStyle = '#fff';
+      ctx.beginPath();
+      ctx.arc(-6, -16, 8, 1.2 * Math.PI, 1.8 * Math.PI);
       ctx.fill();
 
       ctx.restore();
     }
 
-    function drawBackground(time) {
-      const grad = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
-      grad.addColorStop(0, '#0d1b3d');
-      grad.addColorStop(0.5, '#102a6b');
-      grad.addColorStop(1, '#1a237e');
-      ctx.fillStyle = grad;
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
+    function drawBullets() {
+      for (const b of bullets) {
+        ctx.fillStyle = `hsl(${b.hue}, 90%, 60%)`;
+        ctx.beginPath();
+        ctx.arc(b.x, b.y, b.radius, 0, Math.PI * 2);
+        ctx.fill();
 
-      const size = Math.min(canvas.width, canvas.height) * 0.25;
-      const pulse = 0.04 * Math.sin(time * 1.2);
-      drawStar(
-        canvas.width / 2,
-        canvas.height / 2,
-        5,
-        size * (1 + pulse),
-        (size / 2.4) * (1 + pulse),
-        '#ffffff',
-        0.06
-      );
-    }
-
-    function drawPaddlesAndCenter(time) {
-      // Center dashed line
-      ctx.setLineDash([10, 10]);
-      ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.moveTo(canvas.width / 2, 0);
-      ctx.lineTo(canvas.width / 2, canvas.height);
-      ctx.stroke();
-      ctx.setLineDash([]);
-
-      // Animated paddle glow
-      function paddleColor(base, hitTimer, time, tint) {
-        const t = (Math.sin(time * 4) + 1) * 0.5 * 0.15; // subtle breathing
-        const hitBoost = Math.max(0, hitTimer * 2);
-        // base is hex '#rrggbb'
-        const c = base === 'red' ? { r: 244, g: 67, b: 54 } : { r: 33, g: 150, b: 243 };
-        const boost = t + hitBoost;
-        const r = Math.min(255, c.r + 60 * boost);
-        const g = Math.min(255, c.g + 60 * boost);
-        const b = Math.min(255, c.b + 60 * boost);
-        return `rgb(${r|0},${g|0},${b|0})`;
+        ctx.strokeStyle = `hsl(${b.hue}, 100%, 80%)`;
+        ctx.lineWidth = 2;
+        ctx.stroke();
       }
-
-      ctx.fillStyle = paddleColor('red', player.hitTimer, time);
-      ctx.fillRect(player.x, player.y, paddleWidth, paddleHeight);
-
-      ctx.fillStyle = paddleColor('blue', ai.hitTimer, time);
-      ctx.fillRect(ai.x, ai.y, paddleWidth, paddleHeight);
     }
 
-    function drawScores() {
-      ctx.fillStyle = '#ffffff';
-      ctx.font = 'bold 28px system-ui, -apple-system, BlinkMacSystemFont, sans-serif';
-      ctx.textAlign = 'center';
-      ctx.fillText(player.score, canvas.width * 0.25, 40);
-      ctx.fillText(ai.score, canvas.width * 0.75, 40);
+    function drawParticles() {
+      for (const p of particles) {
+        const alpha = Math.max(0, p.life * 2);
+        const color = p.color.replace('ALPHA', alpha.toFixed(3));
+        ctx.fillStyle = color;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 3.5, 0, Math.PI * 2);
+        ctx.fill();
+      }
     }
 
-    function drawOverlay() {
-      ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
+    function drawPowerups() {
+      for (const pu of powerups) {
+        const pulse = (Math.sin(pu.pulse) + 1) * 0.5;
+        const r = pu.radius * (1 + 0.2 * pulse);
 
-      ctx.fillStyle = '#ffffff';
-      ctx.textAlign = 'center';
+        ctx.beginPath();
+        ctx.fillStyle = pu.color.replace('ALPHA', '0.8');
+        ctx.arc(pu.x, pu.y, r, 0, Math.PI * 2);
+        ctx.fill();
 
+        ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        // icon
+        ctx.save();
+        ctx.translate(pu.x, pu.y);
+        ctx.fillStyle = 'rgba(0,0,0,0.8)';
+        ctx.font = 'bold 12px system-ui';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        let txt = '';
+        if (pu.type === 'shield') txt = 'SH';
+        else if (pu.type === 'slowmo') txt = 'SL';
+        else if (pu.type === 'nuke') txt = 'NK';
+        else txt = '+3';
+        ctx.fillText(txt, 0, 1);
+        ctx.restore();
+      }
+    }
+
+    function drawUI() {
+      ctx.fillStyle = '#fff';
+      ctx.textAlign = 'left';
+      ctx.font = 'bold 16px system-ui';
+      ctx.fillText(`Time: ${timeSurvived.toFixed(1)}s`, 12, 22);
+      ctx.fillText(`Score: ${score}`, 12, 42);
+      ctx.fillText(`Best: ${bestTime.toFixed(1)}s • ${bestScore}`, 12, 62);
+      ctx.fillText(`Mode: ${currentDifficulty.label}`, 12, 82);
+
+      if (slowmoTimer > 0) {
+        ctx.fillStyle = 'rgba(200,180,255,0.7)';
+        ctx.font = 'bold 14px system-ui';
+        ctx.fillText('SLOW-MO', 12, 104);
+      }
+      if (shieldTimer > 0) {
+        ctx.fillStyle = 'rgba(120,220,255,0.9)';
+        ctx.font = 'bold 14px system-ui';
+        ctx.fillText('SHIELD', 12, 124);
+      }
+    }
+
+    function drawOverlays() {
       if (gameState === 'menu') {
-        ctx.font = 'bold 34px system-ui';
-        ctx.fillText('Shield Pong', canvas.width / 2, canvas.height / 2 - 40);
+        ctx.fillStyle = 'rgba(0,0,0,0.55)';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        ctx.fillStyle = '#fff';
+        ctx.textAlign = 'center';
+        ctx.font = 'bold 32px system-ui';
+        ctx.fillText('Neon Hell', canvas.width / 2, canvas.height / 2 - 40);
 
         ctx.font = '18px system-ui';
-        ctx.fillText('Drag your finger up & down to move your shield.', canvas.width / 2, canvas.height / 2);
-        ctx.fillText('First to 7 points wins.', canvas.width / 2, canvas.height / 2 + 26);
+        ctx.fillText('Drag your rock god to dodge the neon bullets.', canvas.width / 2, canvas.height / 2);
+        ctx.fillText('Tap to choose difficulty and start.', canvas.width / 2, canvas.height / 2 + 26);
 
-        ctx.font = 'bold 20px system-ui';
-        ctx.fillText('Tap anywhere to start', canvas.width / 2, canvas.height / 2 + 70);
+        ctx.font = '14px system-ui';
+        ctx.fillText(`Best: ${bestTime.toFixed(1)}s • ${bestScore} pts`, canvas.width / 2, canvas.height / 2 + 56);
+      } else if (gameState === 'choosing') {
+        ctx.fillStyle = 'rgba(0,0,0,0.60)';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        ctx.fillStyle = '#fff';
+        ctx.textAlign = 'center';
+        ctx.font = 'bold 26px system-ui';
+        ctx.fillText('Choose Difficulty', canvas.width / 2, canvas.height / 2 - 20);
+
+        ctx.font = '14px system-ui';
+        ctx.fillText('Tap one of the modes below', canvas.width / 2, canvas.height / 2 + 4);
+
+        layoutDifficultyButtons();
+        diffButtons.forEach(btn => {
+          const r = btn.rect;
+          const diff = difficulties[btn.key];
+          ctx.fillStyle = 'rgba(0,0,0,0.8)';
+          ctx.fillRect(r.x, r.y, r.w, r.h);
+
+          ctx.strokeStyle = diff.color;
+          ctx.lineWidth = 2;
+          ctx.strokeRect(r.x, r.y, r.w, r.h);
+
+          ctx.fillStyle = '#fff';
+          ctx.font = 'bold 14px system-ui';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(diff.label, r.x + r.w / 2, r.y + r.h / 2);
+        });
       } else if (gameState === 'gameover') {
-        ctx.font = 'bold 30px system-ui';
-        ctx.fillText(winnerText, canvas.width / 2, canvas.height / 2 - 20);
+        ctx.fillStyle = 'rgba(0,0,0,0.55)';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        ctx.fillStyle = '#fff';
+        ctx.textAlign = 'center';
+        ctx.font = 'bold 28px system-ui';
+        ctx.fillText('You got blasted off stage!', canvas.width / 2, canvas.height / 2 - 30);
 
         ctx.font = '18px system-ui';
-        ctx.fillText(`Final score: You ${player.score} – ${ai.score} Rival`, canvas.width / 2, canvas.height / 2 + 10);
+        ctx.fillText(`You survived ${timeSurvived.toFixed(1)} seconds`, canvas.width / 2, canvas.height / 2);
+        ctx.fillText(`Score: ${score}`, canvas.width / 2, canvas.height / 2 + 24);
+        ctx.fillText(`Best: ${bestTime.toFixed(1)}s • ${bestScore} pts`, canvas.width / 2, canvas.height / 2 + 48);
 
         ctx.font = 'bold 20px system-ui';
-        ctx.fillText('Tap anywhere to play again', canvas.width / 2, canvas.height / 2 + 55);
+        ctx.fillText('Tap to change difficulty & retry', canvas.width / 2, canvas.height / 2 + 84);
       }
     }
 
-    // --- Game logic ---
-    let lastTime = performance.now();
-
-    function update(dt) {
-      if (gameState !== 'playing') {
-        updateParticles(dt);
-        return;
-      }
-
-      player.hitTimer = Math.max(0, player.hitTimer - dt);
-      ai.hitTimer = Math.max(0, ai.hitTimer - dt);
-
-      ball.x += ball.vx;
-      ball.y += ball.vy;
-
-      // Wall collision
-      if (ball.y - ballRadius < 0 && ball.vy < 0) {
-        ball.vy *= -1;
-        playBeep(550, 0.06, 0.15);
-        spawnBurst(ball.x, ballRadius + 4, 'rgba(220,220,255,ALPHA)', 10, 4);
-      }
-      if (ball.y + ballRadius > canvas.height && ball.vy > 0) {
-        ball.vy *= -1;
-        playBeep(550, 0.06, 0.15);
-        spawnBurst(ball.x, canvas.height - ballRadius - 4, 'rgba(220,220,255,ALPHA)', 10, 4);
-      }
-
-      // Player paddle
-      if (
-        ball.x - ballRadius < player.x + paddleWidth &&
-        ball.y > player.y &&
-        ball.y < player.y + paddleHeight &&
-        ball.vx < 0
-      ) {
-        ball.vx *= -1.1;
-        const hitPos = (ball.y - (player.y + paddleHeight / 2)) / (paddleHeight / 2);
-        ball.vy = hitPos * 6;
-        playBeep(420, 0.08, 0.25);
-        spawnBurst(player.x + paddleWidth, ball.y, 'rgba(255,120,120,ALPHA)', 18, 7);
-        player.hitTimer = 0.3;
-      }
-
-      // AI paddle
-      if (
-        ball.x + ballRadius > ai.x &&
-        ball.y > ai.y &&
-        ball.y < ai.y + paddleHeight &&
-        ball.vx > 0
-      ) {
-        ball.vx *= -1.1;
-        const hitPos = (ball.y - (ai.y + paddleHeight / 2)) / (paddleHeight / 2);
-        ball.vy = hitPos * 6;
-        playBeep(520, 0.08, 0.23);
-        spawnBurst(ai.x, ball.y, 'rgba(120,170,255,ALPHA)', 18, 7);
-        ai.hitTimer = 0.3;
-      }
-
-      // Scoring
-      if (ball.x + ballRadius < 0) {
-        ai.score += 1;
-        playBeep(260, 0.18, 0.25);
-        spawnBurst(canvas.width * 0.75, 40, 'rgba(255,255,255,ALPHA)', 26, 6);
-        if (ai.score >= MAX_SCORE) {
-          gameOver(false);
-        } else {
-          resetBall(1);
-        }
-      }
-
-      if (ball.x - ballRadius > canvas.width) {
-        player.score += 1;
-        playBeep(720, 0.18, 0.28);
-        spawnBurst(canvas.width * 0.25, 40, 'rgba(255,255,255,ALPHA)', 26, 6);
-        if (player.score >= MAX_SCORE) {
-          gameOver(true);
-        } else {
-          resetBall(-1);
-        }
-      }
-
-      // Simple AI
-      const target = ball.y;
-      const aiSpeed = 4.5;
-      if (ai.y + paddleHeight / 2 < target - 10) ai.y += aiSpeed;
-      else if (ai.y + paddleHeight / 2 > target + 10) ai.y -= aiSpeed;
-
-      clampPaddles();
-      updateParticles(dt);
-    }
-
-    function gameOver(playerWon) {
-      gameState = 'gameover';
-      winnerText = playerWon ? 'You Win!' : 'You Lose!';
-      // little rising triad
-      if (playerWon) {
-        playBeep(660, 0.16, 0.3);
-        setTimeout(() => playBeep(880, 0.16, 0.3), 120);
-        setTimeout(() => playBeep(1040, 0.2, 0.3), 240);
-      } else {
-        playBeep(260, 0.18, 0.28);
-        setTimeout(() => playBeep(200, 0.22, 0.28), 150);
-      }
-    }
-
+    // ---- MAIN LOOP ----
     function loop(now) {
       const dt = Math.min(0.05, (now - lastTime) / 1000);
       lastTime = now;
@@ -496,27 +791,22 @@
       update(dt);
 
       const t = now / 1000;
-
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
       drawBackground(t);
-      drawPaddlesAndCenter(t);
-      drawShieldBall(gameState !== 'playing', t);
+      drawBullets();
       drawParticles();
-      drawScores();
-
-      if (gameState === 'menu') {
-        hud.textContent = 'Shield Pong – tap to start';
-        drawOverlay();
-      } else if (gameState === 'gameover') {
-        hud.textContent = 'Game over – tap to play again';
-        drawOverlay();
-      } else {
-        hud.textContent = 'Drag your finger to move your shield';
+      drawPowerups();
+      drawPlayer(t);
+      if (gameState === 'playing') {
+        drawUI();
       }
+      drawOverlays();
 
       requestAnimationFrame(loop);
     }
 
-    resetBall(1);
+    // Initial HUD
+    hud.textContent = 'Neon Hell – tap to start • music toggle below';
     requestAnimationFrame(loop);
   </script>
 </body>
